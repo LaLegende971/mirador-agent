@@ -1,0 +1,8 @@
+/mirador-agent
+*.exe
+dist/
+*.pem
+*.key
+.DS_Store
+.vscode/
+.idea/
