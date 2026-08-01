@@ -119,8 +119,11 @@ func CollectMetrics() []inventory.MetricPoint {
 	return points
 }
 
-// loadAndDivideByCPUs ramène la charge 1 min au nombre de coeurs pour une valeur comparable
-// entre machines, cohérente avec le seuil "cpu.load.threshold" du catalogue d'intégrations.
+// loadAndDivideByCPUs ramène la charge 1 min au nombre de coeurs, en pourcentage (0-100+) :
+// le catalogue d'intégrations déclare "cpu.load.threshold" avec unit=percent (voir
+// be3c109dfcfa_seed_catalogue_intégrations.py), et le collecteur Windows envoie déjà un vrai
+// pourcentage (\Processor(_Total)\% Processor Time). Sans le ×100, un ratio brut (0-1) ne
+// franchit quasiment jamais un seuil à 90 — l'alerte CPU serait de fait inopérante sur Linux.
 func loadAndDivideByCPUs() (float64, bool) {
 	load, ok := loadAverage1m()
 	if !ok {
@@ -128,9 +131,9 @@ func loadAndDivideByCPUs() (float64, bool) {
 	}
 	cpus := numCPU()
 	if cpus <= 0 {
-		return load, true
+		return load * 100, true
 	}
-	return load / float64(cpus), true
+	return load / float64(cpus) * 100, true
 }
 
 func numCPU() int {
