@@ -82,17 +82,131 @@ func swapUsedPercent(meminfo map[string]float64) (float64, bool) {
 	return (total - free) / total * 100, true
 }
 
-func diskUsedPercent(mount string) (float64, bool) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(mount, &stat); err != nil {
-		return 0, false
+type partition struct {
+	mount      string
+	usedPct    float64
+	totalBytes float64
+}
+
+// allPartitions lit /proc/mounts et ne garde que les systèmes de fichiers adossés à un
+// périphérique bloc réel (source commençant par /dev/) — filtre à la fois tout le pseudo-fs
+// (proc, sysfs, cgroup, tmpfs…) et les partages réseau (nfs, cifs), sans avoir à maintenir
+// une liste de types à exclure qui devient vite incomplète.
+func allPartitions() []partition {
+	f, err := os.Open("/proc/mounts")
+	if err != nil {
+		return nil
 	}
-	total := stat.Blocks * uint64(stat.Bsize)
-	free := stat.Bfree * uint64(stat.Bsize)
-	if total == 0 {
-		return 0, false
+	defer f.Close()
+
+	seen := map[string]bool{}
+	var result []partition
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		source, mount := fields[0], fields[1]
+		if !strings.HasPrefix(source, "/dev/") || seen[mount] {
+			continue
+		}
+		seen[mount] = true
+
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs(mount, &stat); err != nil {
+			continue
+		}
+		total := stat.Blocks * uint64(stat.Bsize)
+		if total == 0 {
+			continue
+		}
+		free := stat.Bfree * uint64(stat.Bsize)
+		result = append(result, partition{
+			mount:      mount,
+			usedPct:    float64(total-free) / float64(total) * 100,
+			totalBytes: float64(total),
+		})
 	}
-	return float64(total-free) / float64(total) * 100, true
+	return result
+}
+
+// sanitizeMount ramène un point de montage à un segment de metric_key stable : "/" -> "root"
+// (préserve la clé "disk.root.used_pct" attendue telle quelle par alert_engine.py, qui ne
+// distingue pas les OS pour ce check), "/boot/efi" -> "boot_efi".
+func sanitizeMount(mount string) string {
+	trimmed := strings.Trim(mount, "/")
+	if trimmed == "" {
+		return "root"
+	}
+	return strings.ReplaceAll(trimmed, "/", "_")
+}
+
+var (
+	netMu                sync.Mutex
+	netLastRx, netLastTx float64
+	netLastSample        time.Time
+)
+
+// readNetDev additionne le trafic de toutes les interfaces sauf lo (jamais du trafic
+// réseau réel) — pas de détail par interface, une seule paire de compteurs agrégés.
+func readNetDev() (rxBytes, txBytes float64, ok bool) {
+	f, err := os.Open("/proc/net/dev")
+	if err != nil {
+		return 0, 0, false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	lineNum := 0
+	found := false
+	for scanner.Scan() {
+		lineNum++
+		if lineNum <= 2 {
+			continue // deux lignes d'en-tête
+		}
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 10 {
+			continue
+		}
+		iface := strings.TrimSuffix(fields[0], ":")
+		if iface == "lo" {
+			continue
+		}
+		rx, err1 := strconv.ParseFloat(fields[1], 64)
+		tx, err2 := strconv.ParseFloat(fields[9], 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		rxBytes += rx
+		txBytes += tx
+		found = true
+	}
+	return rxBytes, txBytes, found
+}
+
+// networkThroughput : même schéma delta-entre-deux-cycles que agentCPUPercent — un compteur
+// cumulatif depuis le boot n'a de sens qu'en débit, jamais en valeur brute.
+func networkThroughput() (rxPerSec, txPerSec float64, ok bool) {
+	rx, tx, readOK := readNetDev()
+	if !readOK {
+		return 0, 0, false
+	}
+	now := time.Now()
+
+	netMu.Lock()
+	lastRx, lastTx, lastSample := netLastRx, netLastTx, netLastSample
+	netLastRx, netLastTx, netLastSample = rx, tx, now
+	netMu.Unlock()
+
+	if lastSample.IsZero() {
+		return 0, 0, false
+	}
+	elapsed := now.Sub(lastSample).Seconds()
+	if elapsed <= 0 {
+		return 0, 0, false
+	}
+	return (rx - lastRx) / elapsed, (tx - lastTx) / elapsed, true
 }
 
 // failedUnitsCount : nombre d'unités systemd en échec. Un indicateur agrégé plutôt qu'un
@@ -210,8 +324,10 @@ func CollectMetrics() []inventory.MetricPoint {
 	if v, ok := swapUsedPercent(meminfo); ok {
 		add("swap.used_pct", v, ok)
 	}
-	if v, ok := diskUsedPercent("/"); ok {
-		add("disk.root.used_pct", v, ok)
+	for _, p := range allPartitions() {
+		key := sanitizeMount(p.mount)
+		add("disk."+key+".used_pct", p.usedPct, true)
+		add("disk."+key+".total_bytes", p.totalBytes, true)
 	}
 	if v, ok := failedUnitsCount(); ok {
 		add("services.failed_count", v, ok)
@@ -221,6 +337,10 @@ func CollectMetrics() []inventory.MetricPoint {
 	}
 	if v, ok := agentMemoryBytes(); ok {
 		add("agent.memory_bytes", v, ok)
+	}
+	if rx, tx, ok := networkThroughput(); ok {
+		add("network.rx_bytes_per_sec", rx, true)
+		add("network.tx_bytes_per_sec", tx, true)
 	}
 
 	return points

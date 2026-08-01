@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,11 +31,11 @@ func queryCounter(path string) (float64, bool) {
 	return v, true
 }
 
-func diskUsedPercent() (float64, bool) {
-	script := `
-$d = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='C:'"
-if ($d.Size -gt 0) { [math]::Round((($d.Size - $d.FreeSpace) / $d.Size) * 100, 2) }
-`
+// queryCounterSum additionne CookedValue sur toutes les instances d'un compteur PDH — pour
+// le réseau, une instance par carte, jamais de détail par carte souhaité ici (comme le
+// collecteur Linux, un seul débit agrégé).
+func queryCounterSum(path string) (float64, bool) {
+	script := `(Get-Counter '` + path + `').CounterSamples | Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum`
 	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()
 	if err != nil {
 		return 0, false
@@ -44,6 +45,46 @@ if ($d.Size -gt 0) { [math]::Round((($d.Size - $d.FreeSpace) / $d.Size) * 100, 2
 		return 0, false
 	}
 	return v, true
+}
+
+type logicalDisk struct {
+	DeviceID string
+	Size     float64
+	Free     float64
+}
+
+// allPartitions : DriveType=3 (fixe) exclut les lecteurs amovibles/réseau/CD — même esprit
+// que le filtre "/dev/*" côté Linux, ne remonter que des disques locaux réels.
+func allPartitions() ([]logicalDisk, bool) {
+	script := `
+Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" |
+  Select-Object DeviceID, Size, @{Name='Free';Expression={$_.FreeSpace}} | ConvertTo-Json
+`
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()
+	if err != nil {
+		return nil, false
+	}
+	var disks []logicalDisk
+	// Un seul disque désérialise en objet, pas en tableau : ConvertTo-Json ne l'enveloppe
+	// dans [] que s'il y a plusieurs éléments.
+	if err := json.Unmarshal(out, &disks); err != nil {
+		var single logicalDisk
+		if err := json.Unmarshal(out, &single); err != nil {
+			return nil, false
+		}
+		disks = []logicalDisk{single}
+	}
+	return disks, true
+}
+
+// sanitizeDrive : "C:" -> "root" (préserve la clé "disk.root.used_pct" attendue telle
+// quelle par alert_engine.py, déjà le comportement historique de ce collecteur), "D:" -> "d".
+func sanitizeDrive(deviceID string) string {
+	letter := strings.ToLower(strings.TrimSuffix(deviceID, ":"))
+	if letter == "c" {
+		return "root"
+	}
+	return letter
 }
 
 type selfProcessSample struct {
@@ -121,14 +162,27 @@ func CollectMetrics() []inventory.MetricPoint {
 	if v, ok := queryCounter(`\Paging File(_Total)\% Usage`); ok {
 		add("swap.used_pct", v, ok)
 	}
-	if v, ok := diskUsedPercent(); ok {
-		add("disk.root.used_pct", v, ok)
+	if disks, ok := allPartitions(); ok {
+		for _, d := range disks {
+			if d.Size <= 0 {
+				continue
+			}
+			key := sanitizeDrive(d.DeviceID)
+			add("disk."+key+".used_pct", (d.Size-d.Free)/d.Size*100, true)
+			add("disk."+key+".total_bytes", d.Size, true)
+		}
 	}
 	if sample, ok := querySelfProcess(); ok {
 		add("agent.memory_bytes", sample.Mem, ok)
 		if pct, ok := agentCPUPercent(sample.CPUSeconds); ok {
 			add("agent.cpu_pct", pct, ok)
 		}
+	}
+	if rx, ok := queryCounterSum(`\Network Interface(*)\Bytes Received/sec`); ok {
+		add("network.rx_bytes_per_sec", rx, true)
+	}
+	if tx, ok := queryCounterSum(`\Network Interface(*)\Bytes Sent/sec`); ok {
+		add("network.tx_bytes_per_sec", tx, true)
 	}
 
 	return points
