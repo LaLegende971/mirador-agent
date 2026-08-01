@@ -58,6 +58,11 @@ func CollectMetrics() []inventory.MetricPoint {
 	if v, ok := queryCounter(`\Memory\% Committed Bytes In Use`); ok {
 		add("memory.used_pct", v, ok)
 	}
+	// \Paging File(_Total)\% Usage : équivalent Windows du swap (fichier d'échange). Même
+	// compteur PDH que les autres métriques, pas de requête CIM séparée à ajouter.
+	if v, ok := queryCounter(`\Paging File(_Total)\% Usage`); ok {
+		add("swap.used_pct", v, ok)
+	}
 	if v, ok := diskUsedPercent(); ok {
 		add("disk.root.used_pct", v, ok)
 	}

@@ -34,10 +34,12 @@ func loadAverage1m() (float64, bool) {
 	return v, err == nil
 }
 
-func memoryUsedPercent() (float64, bool) {
+// readMemInfo lit /proc/meminfo une seule fois par cycle ; memoryUsedPercent et
+// swapUsedPercent en partagent le résultat plutôt que de rouvrir le fichier chacune.
+func readMemInfo() (map[string]float64, bool) {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {
-		return 0, false
+		return nil, false
 	}
 	defer f.Close()
 
@@ -54,12 +56,28 @@ func memoryUsedPercent() (float64, bool) {
 			values[key] = v
 		}
 	}
-	total, ok1 := values["MemTotal"]
-	avail, ok2 := values["MemAvailable"]
+	return values, true
+}
+
+func memoryUsedPercent(meminfo map[string]float64) (float64, bool) {
+	total, ok1 := meminfo["MemTotal"]
+	avail, ok2 := meminfo["MemAvailable"]
 	if !ok1 || !ok2 || total == 0 {
 		return 0, false
 	}
 	return (total - avail) / total * 100, true
+}
+
+// swapUsedPercent : comme le check_swap de Centreon — pourcentage utilisé, jamais remonté
+// si aucun swap n'est configuré (SwapTotal=0) plutôt que d'envoyer un 0 % trompeur qui
+// laisserait croire à un swap présent et vide.
+func swapUsedPercent(meminfo map[string]float64) (float64, bool) {
+	total, ok1 := meminfo["SwapTotal"]
+	free, ok2 := meminfo["SwapFree"]
+	if !ok1 || !ok2 || total == 0 {
+		return 0, false
+	}
+	return (total - free) / total * 100, true
 }
 
 func diskUsedPercent(mount string) (float64, bool) {
@@ -106,8 +124,12 @@ func CollectMetrics() []inventory.MetricPoint {
 	if v, ok := loadAndDivideByCPUs(); ok {
 		add("cpu.load", v, ok)
 	}
-	if v, ok := memoryUsedPercent(); ok {
+	meminfo, _ := readMemInfo()
+	if v, ok := memoryUsedPercent(meminfo); ok {
 		add("memory.used_pct", v, ok)
+	}
+	if v, ok := swapUsedPercent(meminfo); ok {
+		add("swap.used_pct", v, ok)
 	}
 	if v, ok := diskUsedPercent("/"); ok {
 		add("disk.root.used_pct", v, ok)
