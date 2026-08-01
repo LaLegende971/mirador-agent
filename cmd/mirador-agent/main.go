@@ -27,7 +27,7 @@ const agentVersion = "0.1.0"
 const (
 	metricsInterval   = 60 * time.Second
 	inventoryInterval = time.Hour
-	tasksInterval     = 20 * time.Second
+	tasksInterval     = 5 * time.Second
 )
 
 func main() {
