@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/LaLegende971/mirador-agent/internal/inventory"
 )
@@ -48,6 +49,53 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, out any) e
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *Client) getJSON(ctx context.Context, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("appel à %s : %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s a répondu HTTP %d : %s", path, resp.StatusCode, respBody)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// Task est la vue minimale qu'un agent reçoit d'une tâche (Étape 8) : ni auteur, ni
+// historique, ni résultat d'une exécution précédente — le serveur ne lui expose que ce
+// qu'il doit exécuter et jusqu'à quand (même principe que /agent/config, section 3.3).
+type Task struct {
+	ID        string          `json:"id"`
+	Kind      string          `json:"kind"`
+	Payload   json.RawMessage `json:"payload"`
+	ExpiresAt time.Time       `json:"expires_at"`
+}
+
+func (c *Client) FetchTasks(ctx context.Context) ([]Task, error) {
+	var out struct {
+		Items []Task `json:"items"`
+	}
+	err := c.getJSON(ctx, "/api/v1/agent/tasks", &out)
+	return out.Items, err
+}
+
+// SubmitTaskResult remonte un état intermédiaire (`running`) ou terminal (`succeeded`,
+// `failed`) — jamais `queued`/`sent`/`expired`, qui n'appartiennent qu'au serveur (D7).
+func (c *Client) SubmitTaskResult(ctx context.Context, taskID, state string, result map[string]any) error {
+	path := fmt.Sprintf("/api/v1/agent/tasks/%s/result", taskID)
+	return c.postJSON(ctx, path, map[string]any{"state": state, "result": result}, nil)
 }
 
 func (c *Client) CheckFingerprint(ctx context.Context, fingerprint string) (snapshotRequired bool, err error) {

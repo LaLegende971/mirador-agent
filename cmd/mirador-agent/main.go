@@ -18,6 +18,7 @@ import (
 	"github.com/LaLegende971/mirador-agent/internal/enroll"
 	"github.com/LaLegende971/mirador-agent/internal/inventory"
 	"github.com/LaLegende971/mirador-agent/internal/state"
+	"github.com/LaLegende971/mirador-agent/internal/tasks"
 	"github.com/LaLegende971/mirador-agent/internal/transport"
 )
 
@@ -26,6 +27,7 @@ const agentVersion = "0.1.0"
 const (
 	metricsInterval   = 60 * time.Second
 	inventoryInterval = time.Hour
+	tasksInterval     = 20 * time.Second
 )
 
 func main() {
@@ -70,6 +72,8 @@ func main() {
 	defer metricsTicker.Stop()
 	inventoryTicker := time.NewTicker(inventoryInterval)
 	defer inventoryTicker.Stop()
+	tasksTicker := time.NewTicker(tasksInterval)
+	defer tasksTicker.Stop()
 
 	for {
 		select {
@@ -80,6 +84,8 @@ func main() {
 			runMetricsCycle(ctx, logger, client)
 		case <-inventoryTicker.C:
 			runInventoryCycle(ctx, logger, client, hostname)
+		case <-tasksTicker.C:
+			tasks.Run(ctx, logger, client, func() { runInventoryCycle(ctx, logger, client, hostname) })
 		}
 	}
 }
