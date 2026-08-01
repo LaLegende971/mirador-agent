@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -135,4 +136,39 @@ func (c *Client) SendMetrics(ctx context.Context, points []inventory.MetricPoint
 		"points":   points,
 	}, &out)
 	return out.Ingested, err
+}
+
+// DownloadBinary récupère le binaire agent publié pour l'OS de cet asset (déterminé
+// côté serveur à partir de asset_id, jamais envoyé par l'agent) et l'écrit dans destPath.
+// Exécuté en réponse à une tâche update_agent — jamais sondé spontanément (D7).
+func (c *Client) DownloadBinary(ctx context.Context, destPath string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/agent/binary", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("appel à /api/v1/agent/binary : %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("/api/v1/agent/binary a répondu HTTP %d : %s", resp.StatusCode, respBody)
+	}
+
+	f, err := os.OpenFile(destPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	if err != nil {
+		return fmt.Errorf("création de %s : %w", destPath, err)
+	}
+	defer f.Close()
+
+	written, err := io.Copy(f, resp.Body)
+	if err != nil {
+		return fmt.Errorf("écriture de %s : %w", destPath, err)
+	}
+	if written == 0 {
+		return fmt.Errorf("binaire téléchargé vide")
+	}
+	return nil
 }

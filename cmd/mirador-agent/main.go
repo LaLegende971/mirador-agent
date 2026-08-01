@@ -22,7 +22,7 @@ import (
 	"github.com/LaLegende971/mirador-agent/internal/transport"
 )
 
-const agentVersion = "0.1.0"
+const agentVersion = "0.2.1"
 
 const (
 	metricsInterval   = 60 * time.Second
