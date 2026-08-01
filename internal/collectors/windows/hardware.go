@@ -35,12 +35,33 @@ type cimProcessor struct {
 	Name string
 }
 
+type cimLogicalDisk struct {
+	DeviceID string
+	Size     uint64
+}
+
 // queryCIMArray force un résultat tableau même à instance unique (`@(...)`), sinon
 // ConvertTo-Json émet un objet nu pour une seule instance et casse le décodage JSON.
 func queryCIMArray(class string) ([]byte, error) {
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		"@(Get-CimInstance -ClassName "+class+") | ConvertTo-Json -Compress")
 	return cmd.Output()
+}
+
+// diskTotalBytesC : capacité totale du disque système — filtré sur C: comme
+// diskUsedPercent (metrics.go), pas de queryCIMArray générique ici (pas de filtre WQL).
+func diskTotalBytesC() int64 {
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`@(Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='C:'") | ConvertTo-Json -Compress`)
+	b, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	var disks []cimLogicalDisk
+	if err := json.Unmarshal(b, &disks); err != nil || len(disks) == 0 {
+		return 0
+	}
+	return int64(disks[0].Size)
 }
 
 func osVersionFromRegistry() (name, version string) {
@@ -94,6 +115,7 @@ func CollectHardware(agentVersion string) inventory.HardwareInfo {
 		Serial:       bios.SerialNumber,
 		CPUDesc:      cpuDesc,
 		MemoryBytes:  int64(cs.TotalPhysicalMemory),
+		DiskBytes:    diskTotalBytesC(),
 		AgentVersion: agentVersion,
 	}
 }

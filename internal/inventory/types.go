@@ -14,6 +14,7 @@ type HardwareInfo struct {
 	Serial       string `json:"serial,omitempty"`
 	CPUDesc      string `json:"cpu_desc,omitempty"`
 	MemoryBytes  int64  `json:"memory_bytes,omitempty"`
+	DiskBytes    int64  `json:"disk_bytes,omitempty"` // capacité totale du disque système (C:\ / racine)
 	PrimaryIP    string `json:"primary_ip,omitempty"`
 	AgentVersion string `json:"agent_version,omitempty"`
 }

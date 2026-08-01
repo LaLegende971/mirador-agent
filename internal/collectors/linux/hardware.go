@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/LaLegende971/mirador-agent/internal/inventory"
 )
@@ -93,6 +94,16 @@ func memoryTotalBytes() int64 {
 	return 0
 }
 
+// diskTotalBytes : capacité totale de la partition racine — même appel statfs que
+// diskUsedPercent (metrics.go), cohérent avec « disk.root.used_pct ».
+func diskTotalBytes(mount string) int64 {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(mount, &stat); err != nil {
+		return 0
+	}
+	return int64(stat.Blocks) * int64(stat.Bsize)
+}
+
 // primaryIP se connecte (sans envoyer de paquet, UDP) à une adresse externe pour laisser le
 // noyau choisir l'interface de sortie : c'est l'équivalent de « la passerelle par défaut
 // remontée par l'agent » mentionné section 7 pour la découverte réseau best-effort.
@@ -128,6 +139,7 @@ func CollectHardware(agentVersion string) inventory.HardwareInfo {
 		Serial:       readDMI("product_serial"),
 		CPUDesc:      cpuDescription(),
 		MemoryBytes:  memoryTotalBytes(),
+		DiskBytes:    diskTotalBytes("/"),
 		PrimaryIP:    primaryIP(),
 		AgentVersion: agentVersion,
 	}
