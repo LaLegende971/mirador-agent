@@ -4,7 +4,11 @@ package windows
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
+	"runtime"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/LaLegende971/mirador-agent/internal/inventory"
@@ -42,6 +46,60 @@ if ($d.Size -gt 0) { [math]::Round((($d.Size - $d.FreeSpace) / $d.Size) * 100, 2
 	return v, true
 }
 
+type selfProcessSample struct {
+	Mem        float64 `json:"Mem"`
+	CPUSeconds float64 `json:"CpuSeconds"`
+}
+
+// querySelfProcess : working set (RSS) et temps CPU cumulé du processus mirador-agent
+// lui-même, via Get-Process -Id — même mécanisme PowerShell que queryCounter plutôt qu'un
+// appel Win32 direct, pour rester cohérent avec le reste des collecteurs Windows.
+func querySelfProcess() (selfProcessSample, bool) {
+	script := `$p = Get-Process -Id ` + strconv.Itoa(os.Getpid()) + `
+[PSCustomObject]@{ Mem = $p.WorkingSet64; CpuSeconds = $p.TotalProcessorTime.TotalSeconds } | ConvertTo-Json`
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()
+	if err != nil {
+		return selfProcessSample{}, false
+	}
+	var s selfProcessSample
+	if err := json.Unmarshal(out, &s); err != nil {
+		return selfProcessSample{}, false
+	}
+	return s, true
+}
+
+var (
+	selfCPUMu      sync.Mutex
+	selfLastCPUSec float64
+	selfLastSample time.Time
+)
+
+// agentCPUPercent : delta du temps CPU cumulé (TotalProcessorTime) entre deux cycles de
+// collecte, ramené au pourcentage du temps total écoulé sur l'ensemble des coeurs logiques
+// — même convention que le collecteur Linux. Rien à envoyer au premier cycle (pas encore
+// d'échantillon de référence).
+func agentCPUPercent(cpuSeconds float64) (float64, bool) {
+	now := time.Now()
+
+	selfCPUMu.Lock()
+	lastCPUSec, lastSample := selfLastCPUSec, selfLastSample
+	selfLastCPUSec, selfLastSample = cpuSeconds, now
+	selfCPUMu.Unlock()
+
+	if lastSample.IsZero() {
+		return 0, false
+	}
+	elapsed := now.Sub(lastSample).Seconds()
+	if elapsed <= 0 {
+		return 0, false
+	}
+	cpus := runtime.NumCPU()
+	if cpus <= 0 {
+		cpus = 1
+	}
+	return (cpuSeconds - lastCPUSec) / elapsed / float64(cpus) * 100, true
+}
+
 func CollectMetrics() []inventory.MetricPoint {
 	now := time.Now().UTC()
 	var points []inventory.MetricPoint
@@ -65,6 +123,12 @@ func CollectMetrics() []inventory.MetricPoint {
 	}
 	if v, ok := diskUsedPercent(); ok {
 		add("disk.root.used_pct", v, ok)
+	}
+	if sample, ok := querySelfProcess(); ok {
+		add("agent.memory_bytes", sample.Mem, ok)
+		if pct, ok := agentCPUPercent(sample.CPUSeconds); ok {
+			add("agent.cpu_pct", pct, ok)
+		}
 	}
 
 	return points

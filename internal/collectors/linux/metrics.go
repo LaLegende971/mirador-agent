@@ -4,10 +4,12 @@ package linux
 
 import (
 	"bufio"
+	"bytes"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -111,6 +113,83 @@ func failedUnitsCount() (float64, bool) {
 	return float64(count), true
 }
 
+// agentMemoryBytes : RSS du processus mirador-agent lui-même, pas de l'hôte — empreinte
+// affichée sur État pour vérifier que l'agent reste léger, jamais alertée (pas de seuil).
+func agentMemoryBytes() (float64, bool) {
+	f, err := os.Open("/proc/self/status")
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 2 && fields[0] == "VmRSS:" {
+			kb, err := strconv.ParseFloat(fields[1], 64)
+			if err != nil {
+				return 0, false
+			}
+			return kb * 1024, true
+		}
+	}
+	return 0, false
+}
+
+const clkTck = 100 // USER_HZ : fixe à 100 sur toutes les architectures Linux courantes
+
+var (
+	selfCPUMu      sync.Mutex
+	selfLastTicks  float64
+	selfLastSample time.Time
+)
+
+// agentCPUPercent : delta de temps CPU (utime+stime, /proc/self/stat) entre deux cycles de
+// collecte, ramené au pourcentage du temps total écoulé sur l'ensemble des coeurs — même
+// convention que loadAndDivideByCPUs pour cpu.load. Rien à envoyer au premier cycle (pas
+// encore d'échantillon de référence pour calculer un delta).
+func agentCPUPercent() (float64, bool) {
+	data, err := os.ReadFile("/proc/self/stat")
+	if err != nil {
+		return 0, false
+	}
+	// Les champs après la parenthèse fermante du nom de commande (qui peut contenir des
+	// espaces) sont à position fixe : utime est le 14e champ, stime le 15e.
+	end := bytes.LastIndexByte(data, ')')
+	if end < 0 {
+		return 0, false
+	}
+	fields := strings.Fields(string(data[end+1:]))
+	if len(fields) < 13 {
+		return 0, false
+	}
+	utime, err1 := strconv.ParseFloat(fields[11], 64)
+	stime, err2 := strconv.ParseFloat(fields[12], 64)
+	if err1 != nil || err2 != nil {
+		return 0, false
+	}
+	ticks := utime + stime
+	now := time.Now()
+
+	selfCPUMu.Lock()
+	lastTicks, lastSample := selfLastTicks, selfLastSample
+	selfLastTicks, selfLastSample = ticks, now
+	selfCPUMu.Unlock()
+
+	if lastSample.IsZero() {
+		return 0, false
+	}
+	elapsed := now.Sub(lastSample).Seconds()
+	if elapsed <= 0 {
+		return 0, false
+	}
+	cpus := numCPU()
+	if cpus <= 0 {
+		cpus = 1
+	}
+	return (ticks - lastTicks) / clkTck / elapsed / float64(cpus) * 100, true
+}
+
 func CollectMetrics() []inventory.MetricPoint {
 	now := time.Now().UTC()
 	var points []inventory.MetricPoint
@@ -136,6 +215,12 @@ func CollectMetrics() []inventory.MetricPoint {
 	}
 	if v, ok := failedUnitsCount(); ok {
 		add("services.failed_count", v, ok)
+	}
+	if v, ok := agentCPUPercent(); ok {
+		add("agent.cpu_pct", v, ok)
+	}
+	if v, ok := agentMemoryBytes(); ok {
+		add("agent.memory_bytes", v, ok)
 	}
 
 	return points
