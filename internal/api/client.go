@@ -99,6 +99,17 @@ func (c *Client) SubmitTaskResult(ctx context.Context, taskID, state string, res
 	return c.postJSON(ctx, path, map[string]any{"state": state, "result": result}, nil)
 }
 
+// FetchConfig récupère le document résolu (section 3.3) : une entrée par intégration
+// effectivement configurée pour cet asset, groupe ou surcharge confondus — l'agent ne fait
+// pas la différence. Une intégration absente de la réponse veut dire « pas encore de
+// politique » (aucun groupe ne configure cette intégration pour cet asset) : c'est ce que
+// runMetricsCycle consulte pour décider de collecter ou non.
+func (c *Client) FetchConfig(ctx context.Context) (map[string]map[string]any, error) {
+	var out map[string]map[string]any
+	err := c.getJSON(ctx, "/api/v1/agent/config", &out)
+	return out, err
+}
+
 func (c *Client) CheckFingerprint(ctx context.Context, fingerprint string) (snapshotRequired bool, err error) {
 	var out struct {
 		SnapshotRequired bool `json:"snapshot_required"`

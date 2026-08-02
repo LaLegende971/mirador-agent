@@ -22,7 +22,7 @@ import (
 	"github.com/LaLegende971/mirador-agent/internal/transport"
 )
 
-const agentVersion = "0.3.0"
+const agentVersion = "0.4.0"
 
 const (
 	metricsInterval   = 60 * time.Second
@@ -90,7 +90,23 @@ func main() {
 	}
 }
 
+// runMetricsCycle ne collecte rien tant qu'aucune politique n'est appliquée à cet asset :
+// pas un simple filtre à l'envoi, la collecte elle-même (lecture /proc, compteurs
+// Windows…) n'a pas lieu. Le document résolu (/agent/config, section 3.3) fait foi : une
+// entrée pour la clé d'intégration de cet OS signifie qu'au moins un groupe configure la
+// supervision pour cet asset. Tant que ce n'est pas le cas, seuls l'inventaire (Parc) et
+// le battement de tâches continuent — la Supervision, elle, reste muette.
 func runMetricsCycle(ctx context.Context, logger *slog.Logger, client *api.Client) {
+	cfg, err := client.FetchConfig(ctx)
+	if err != nil {
+		logger.Warn("récupération de la configuration échouée", "err", err)
+		return
+	}
+	if len(cfg[collect.OSFamily]) == 0 {
+		logger.Info("aucune politique de supervision appliquée à cet asset, collecte suspendue")
+		return
+	}
+
 	points := collect.Metrics()
 	if len(points) == 0 {
 		return
